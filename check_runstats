@@ -1,0 +1,176 @@
+#!/usr/bin/php
+<?php
+
+/**
+ * Package: check_runstats
+ * Script to check via SNMP if linux process is running
+ *
+ * @package check_runstats
+ * @author Thorsten Eurich  - ik4-sma
+ * @license AGPL 
+ * @copyright 2020 - Continentale Krankenversicherung a.G.
+ *
+ * @version 0.1
+ */
+ 
+$params = getParams();
+$session = initSNMPSession($params);
+$data = checkRunstats($session ,$params['keyword']);
+closeSession ($session);
+
+if (!empty($data)) {
+	$count = count($data);
+	echo 'OK: ' . $count . ' processes with keyword ' . $params['keyword'] . ' found' . "\n";
+	foreach ($data as $key => $value) {
+		echo  $value['name'] . ' (PID:' . $key . ' - ' . $value['path'] .  ")\n";
+	}
+	exit(0);
+}
+else {
+	echo 'CRITICAL: No processes with keyword ' . $params['keyword'] . ' found!' . "\n"; 
+	exit(2);
+}
+
+/*
+ * function checkRunstats uses an SNMP session to determine if a linux process is running
+ * @param $session objects - the snmp session object
+ * @param $keyword var - the given keyword 
+*/ 
+function checkRunstats($session, $keyword)
+{
+	$data = array();
+	$tdata = array();
+	$names = @$session->walk('1.3.6.1.4.1.15601.4.2.1.2');
+	$paths = @$session->walk('1.3.6.1.4.1.15601.4.2.1.4');
+
+	foreach ($names as $key => $value) {
+		$k = explode('.', $key);
+		$n = array_pop($k);
+		$tdata[$n]['name'] = $value;
+	}
+	foreach ($paths as $key => $value) {
+		$k = explode('.', $key);
+		$n = array_pop($k);
+		$tdata[$n]['path'] = $value;
+	}
+
+	foreach ($tdata as $key => $value) {
+		if (stripos($value['name'], $keyword) !== false || stripos($value['path'], $keyword) !== false ) {
+			$data[$key]['name'] = $value['name'];
+			$data[$key]['path'] = $value['path'];
+		}
+	}
+	return $data;
+}
+
+/*
+ * function getParams 
+ * used to determine the given parameters such as hostname, snmp community and other stuff to connect to a server
+ */ 
+function getParams() {
+	$context = array();
+	$version = '';
+
+	$options = getopt("h:u::C::v::p::e::E::k::", array("host:", "community::", "version::", "user::", "password:", "encrypt::", "private_encrypt::", "keyword::"));
+
+	// no options set
+	if(count($options) == 0) {
+		printCheckHelp();
+		exit(0);
+	}
+	if(!isset($options['host']) && !isset($options['h'])) {
+		echo "parameter -h || --host (Hostname of the snmp target) is missing \n";
+		exit(0);
+	}
+
+	if(isset($options['user']) || isset($options['u']))	{
+		$context['version'] = 'VERSION_3';
+	
+		if(!isset($options['password']) && !isset($options['p'])) {
+			echo "parameter -p || --password is missing \n";
+			exit(0);
+		}
+		if(!isset($options['encrypt']) && !isset($options['e'])) {
+			echo "parameter -e || --encrypt (The prefered encryption_mode usually SHA or MD5) is missing \n";
+			exit(0);
+		}
+		if(!isset($options['private_encrypt']) && !isset($options['E'])) {
+			echo "parameter -E || --private_encrypt (The prefered private_encryption_mode usually AES or DES) is missing \n";
+			exit(0);
+		}
+
+		$context['user'] = isset($options['user']) ? $options['user'] : $options['u'];
+		$context['password'] = isset($options['password']) ? $options['password'] : $options['p'];
+		$context['encrypt'] = isset($options['encrypt']) ? $options['encrypt'] : $options['e'];
+		$context['private_encrypt'] = isset($options['private_encrypt']) ? $options['private_encrypt'] : $options['E'];
+		$context['type'] = 'authPriv';
+	}
+
+	elseif (isset($options['community']) || isset($options['C'])) {
+		if(isset($options['version']) || isset($options['v'])) {
+			$context['v'] = isset($options['v']) ? $options['v'] : $options['version'];
+			if ($context['v'] == '1')
+				$context['version'] = 'VERSION_1';
+			else
+				$context['version'] = 'VERSION_2C';
+		}
+		else
+			$context['version'] = 'VERSION_2C';
+			
+		$context['community'] =  isset($options['C']) ? $options['C'] : $options['community'];
+	}
+
+	if(!isset($options['user']) && !isset($options['u']) && !isset($options['C']) && !isset($options['community'])) {
+		echo "parameter -u || --user or -C || --community is missing. Please use either -C for SNMPv2c, -C and -v1 for SNMPv1 or -u for SNMPv3\n";
+		exit(0);
+	}
+
+	$context['host'] = isset($options['host']) ? $options['host'] : $options['h'];
+	define('HOST', $context['host']);
+
+	$context['keyword'] = isset($options['keyword']) ? $options['keyword'] : (isset($options['k']) ? $options['k'] : '');
+		
+	return $context;
+}
+
+/*
+ * Initializes an SNMPSession
+ * @param $snmp array - snmp access data in order to connect to a host : snmpversion, encryption type, username password and community
+ */
+function initSNMPSession ($snmp) {
+	if ($snmp['version'] == 'VERSION_3') {
+		$session = new SNMP(SNMP::VERSION_3, $snmp['host'], $snmp['user'], 3000000, 10);
+		$session->setSecurity($snmp['type'], $snmp['encrypt'], $snmp['password'] , $snmp['private_encrypt'], $snmp['password']);
+	}
+	elseif ($snmp['version'] == 'VERSION_2C')
+		$session = new SNMP(SNMP::VERSION_2C, $snmp['host'], $snmp['community'], 3000000, 10);
+	else
+		$session = new SNMP(SNMP::VERSION_1, $snmp['host'], $snmp['community'], 3000000, 10);
+
+	$session->valueretrieval = SNMP_VALUE_PLAIN;
+	$session->getError();
+	$error = '';
+	$test = @$session->get('1.3.6.1.2.1.1.5.0');
+	$error = $session->getError();
+
+	if (!empty($error))	{
+		echo 'UNKNOWN: ' . $error . ' - Worker: ' . gethostname() . "\n";
+		exit(3);
+	}
+	else 
+		return $session;
+}
+
+/*
+ *  Close SNMPSession
+*/
+function closeSession($session)
+{
+	 $session->close();
+}
+/*
+ * fnction printCheckHelp
+*/
+function printCheckHelp() {
+	echo "still @todo, sorry ..";
+}
